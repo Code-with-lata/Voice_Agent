@@ -214,10 +214,8 @@ def main():
 
     stt_model, groq_client = load_agent_engines()
 
-    # 1. Sidebar
-    # render_sidebar()
 
-    # 2. Screens
+    #  Screens
     if not st.session_state.is_started:
         render_upload_screen()
     else:
@@ -229,7 +227,7 @@ def main():
         # UI & Input
         audio_input = render_interview_ui()  
 
-        # 3. Processing Logic
+        # Processing Logic
         process_answer(audio_input, stt_model, groq_client)
 
 if __name__ == "__main__":

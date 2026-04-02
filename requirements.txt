@@ -1,0 +1,7 @@
+streamlit
+faster-whisper
+groq
+gTTS
+python-dotenv
+python-docx
+PyPDF2

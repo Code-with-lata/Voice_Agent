@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+import re
 import base64
 import tempfile
 import time
@@ -9,13 +10,13 @@ from gtts import gTTS
 from docx import Document
 import PyPDF2
 from dotenv import load_dotenv
-from fpdf import FPDF
+from docx.shared import Pt
+from audio_recorder_streamlit import audio_recorder
 
 
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
 LLM_MODEL = "llama-3.1-8b-instant"
 
 # ================== SMART PROMPT ==================
@@ -49,10 +50,8 @@ SYSTEM_PROMPT = (
     "- Avoid repetition.\n"
 )
 
-# FILE PARSING FUNCTIONS
-
+# ================== FILE PARSING ==================
 def extract_questions_from_file(uploaded_file):
-    """Word ya PDF se questions nikalne ka function"""
     questions = []
     file_type = uploaded_file.name.split('.')[-1].lower()
 
@@ -65,19 +64,27 @@ def extract_questions_from_file(uploaded_file):
         for page in reader.pages:
             text = page.extract_text()
             if text:
-                # Basic splitting by new lines
                 questions.extend([line.strip() for line in text.split('\n') if line.strip()])
     
     return questions
 
 
-# VOICE CORE
-
+# ================== VOICE FUNCTIONS ==================
 @st.cache_resource
 def load_agent_engines():
     stt = WhisperModel("base", device="cpu", compute_type="int8")
     client = Groq(api_key=GROQ_API_KEY)
     return stt, client
+
+
+def generate_greeting(client, history):
+    response = client.chat.completions.create(
+        model=LLM_MODEL,
+        messages=history + [{"role": "user", "content": "Start the interview."}],
+        temperature=0.7
+    )
+    return response.choices[0].message.content
+
 
 def get_ai_decision(client, user_text, next_q, history):
     """AI Brain: Follow-up ya Next Question ka faisla"""
@@ -89,6 +96,8 @@ def get_ai_decision(client, user_text, next_q, history):
                 - Briefly validate if the answer is correct (DON'T repeat it).
                 - If the answer is good, ask the Next Scheduled Question.
                 - If the answer is technically flawed or too short, ask a specific follow-up about that topic.
+
+                
                 """
     response = client.chat.completions.create(
         model=LLM_MODEL,
@@ -97,16 +106,9 @@ def get_ai_decision(client, user_text, next_q, history):
     )
     return response.choices[0].message.content
 
-def generate_greeting(client, history):
-    response = client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=history + [{"role": "user", "content": "Start the interview."}],
-        temperature=0.7
-    )
-    return response.choices[0].message.content
 
 def ai_voice_output(text):
-    """Audio play karne ka sabse reliable tarika"""
+    """AI voice output with auto-play"""
     if not text:
         return
         
@@ -118,262 +120,381 @@ def ai_voice_output(text):
                 data = f.read()
                 b64 = base64.b64encode(data).decode()
             
-            # Unique ID taaki browser har baar naya audio pehchane
-            unique_id = f"audio_{int(time.time())}"
+            unique_id = f"audio_{int(time.time() * 1000)}"
             
             audio_html = f"""
-                <audio id="{unique_id}" autoplay="true">
+                <audio id="{unique_id}" autoplay="true" style="display:none;">
                     <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
                 </audio>
                 <script>
                     var audio = document.getElementById('{unique_id}');
-                    audio.play().catch(function(error) {{
-                        console.log("Autoplay was prevented. Click anywhere on the page.");
-                    }});
+                    audio.onended = function() {{
+                        window.parent.postMessage({{type: 'streamlit:setComponentValue', value: 'finished'}}, '*');
+                    }};
+                    audio.play();
                 </script>
             """
-            st.components.v1.html(audio_html, height=0) # height=0 se ye invisible rahega
+            st.components.v1.html(audio_html, height=0)
         os.remove(fp.name)
     except Exception as e:
         st.error(f"Voice Error: {e}")
 
-def transcribe_voice(stt_model, audio_file):
-    """Voice to Text conversion"""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        tmp.write(audio_file.read())
 
-        segments, _ = stt_model.transcribe(tmp.name)
-        text = " ".join([s.text for s in segments])
-    os.remove(tmp.name)
-    return text.strip()        
 
-# ---------------- PDF ---------------- #
-def generate_pdf():
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
+def transcribe_audio(stt_model, audio_bytes):
+    """Audio bytes ko text me convert karo"""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            tmp.write(audio_bytes)
+            tmp.flush()
+            
+            segments, _ = stt_model.transcribe(tmp.name)
+            text = " ".join([s.text for s in segments])
+            
+        os.remove(tmp.name)
+        return text.strip()
+    except Exception as e:
+        return ""
 
-    total_score = sum(st.session_state.scores)
 
-    pdf.cell(0, 10, "Interview Report", ln=True)
-    pdf.cell(0, 10, f"Total Score: {total_score}", ln=True)
+# ================== PDF REPORT ==================
 
-    pdf.ln(5)
+def generate_report():
+    doc = Document()
+    doc.add_heading('AI Interview Performance Report', 0)
+    
+    # Overall Score Calculation (e.g., 7 / 15)
+    total_obtained = sum(st.session_state.scores)
+    max_possible = len(st.session_state.scores) * 5
+    
+    summary = doc.add_paragraph()
+    run = summary.add_run(f"TOTAL INTERVIEW SCORE: {total_obtained} / {max_possible}")
+    run.bold = True
+    run.font.size = Pt(14)
+    
+    doc.add_paragraph("_" * 40)
+    doc.add_heading('Detailed Evaluation:', level=1)
 
-    for i, ans in enumerate(st.session_state.answers):
-        pdf.multi_cell(0, 8, f"Q{i+1}: {ans['question']}")
-        pdf.multi_cell(0, 8, f"Answer: {ans['answer']}")
-        pdf.multi_cell(0, 8, f"Score: {ans['score']}")
-        pdf.ln(3)
+    if not st.session_state.answers:
+        doc.add_paragraph("No questions were answered.")
+    else:
+        for i, item in enumerate(st.session_state.answers):
+            # Question Heading
+            q = doc.add_paragraph()
+            q.add_run(f"Question {i+1}: {item['question']}").bold = True
+            
+            # User's Answer
+            doc.add_paragraph(f"Your Answer: {item['answer']}")
+            
+            # Simple Score Display (Correctness, Communication, Confidence )
+            s = doc.add_paragraph()
+            s.add_run(f"Final Score: {item['final_score']} / 5").italic = True
+            
+            # Divider line
+            doc.add_paragraph("-" * 30)
 
-    file_path = "report.pdf"
-    pdf.output(file_path)
+    file_path = "interview_report.docx"
+    doc.save(file_path)
     return file_path
 
-# --------------------- streamlit UI INTERFACE ---------------------
 
-
+# ================== SESSION MANAGEMENT ==================
 def init_session():
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = [{"role": "system", "content": SYSTEM_PROMPT}]
-    if "q_bank" not in st.session_state:
-        st.session_state.q_bank = []
-    if "q_index" not in st.session_state:
-        st.session_state.q_index = 0
-    if "is_started" not in st.session_state:
-        st.session_state.is_started = False
-    if "awaiting_intro" not in st.session_state:
-        st.session_state.awaiting_intro = False  
-    if "answers" not in st.session_state:
-        st.session_state.answers = []
-    if "scores" not in st.session_state:
-        st.session_state.scores = []  
-    if "report_ready" not in st.session_state:
-        st.session_state.report_ready = False
-    if "report_file" not in st.session_state:
-        st.session_state.report_file = None
-    if "force_end" not in st.session_state:
-        st.session_state.force_end = False  
-    if "followup_count" not in st.session_state:
-        st.session_state.followup_count = 0          
+    defaults = {
+        "chat_history": [{"role": "system", "content": SYSTEM_PROMPT}],
+        "q_bank": [],
+        "q_index": 0,
+        "mic_counter": 0,
+        "is_started": False,
+        "awaiting_intro": False,
+        "answers": [],
+        "scores": [],
+        "report_ready": False,
+        "report_file": None,
+        "force_end": False,
+        "followup_count": 0,
+        "pending_voice": None,
+        "last_audio_id": None
+    }
+    
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
+
+# ================== UI SCREENS ==================
 def render_upload_screen(groq_client):
-    """Shuruat ki screen jahan file mangi jati hai"""
-    st.info("Please upload your interview questions to start.")
-    file = st.file_uploader("Upload PDF or DOCX", type=['pdf', 'docx'])
+    st.markdown("""
+    <div style="text-align: center; padding: 30px;">
+        <h2>🎯 AI-Powered Voice Interview</h2>
+        <p style="font-size: 18px; color: #666;">Real-time conversation with AI Interviewer</p>
+    </div>
+    """, unsafe_allow_html=True)
     
-    if file and st.button("Begin Interview", use_container_width=True):
-        questions = extract_questions_from_file(file)
-        
-        if questions:
-            greeting = generate_greeting(groq_client, st.session_state.chat_history)
-
-            st.session_state.q_bank = questions
-            st.session_state.is_started = True
-            st.session_state.chat_history.append({"role": "assistant", "content": greeting})
-            st.session_state.pending_voice = greeting
-            # first question store karo
-            st.session_state.first_question = questions[0]
-
-            st.rerun()  
-
-
-def render_interview_ui():
-    """Active interview ki screen"""
+    st.info("📋 Upload your interview questions (PDF or DOCX)")
+    file = st.file_uploader("", type=['pdf', 'docx'], label_visibility="collapsed")
     
-    user_audio = st.audio_input("Speak your answer...")
-    
-    return user_audio  
+    if file:
+        if st.button("🚀 Start Interview", use_container_width=True, type="primary"):
+            questions = extract_questions_from_file(file)
+            
+            if questions:
+                greeting = generate_greeting(groq_client, st.session_state.chat_history)
+                st.session_state.q_bank = questions
+                st.session_state.is_started = True
+                st.session_state.chat_history.append({"role": "assistant", "content": greeting})
+                st.session_state.pending_voice = greeting
+                st.session_state.first_question = questions[0]
+                st.rerun()
+            else:
+                st.error("❌ No questions found in file!")
 
-def process_answer(audio_input, stt_model, groq_client):
-    if not audio_input or audio_input == st.session_state.get("last_id"):
+
+
+def process_user_audio(audio_bytes, stt_model, groq_client):
+    """Process user's audio response"""
+    
+    # Create unique ID for this audio
+    audio_id = hash(audio_bytes)
+    
+    # Skip if already processed
+    if audio_id == st.session_state.last_audio_id:
         return
     
-    st.session_state.last_id = audio_input 
-
-    with st.spinner("AI is thinking..."):
-        user_text = transcribe_voice(stt_model, audio_input)
+    st.session_state.last_audio_id = audio_id
     
-        if not user_text:
+    with st.spinner("🎯 Processing your response..."):
+        user_text = transcribe_audio(stt_model, audio_bytes)
+        
+        if not user_text or len(user_text) < 3:
+            st.warning("⚠️ Could not hear clearly. Please try again.")
+            st.session_state.last_audio_id = None
             return
         
+        # Add to chat
         st.session_state.chat_history.append({"role": "user", "content": user_text})
-    
-    
-       # ===== FIRST GREETING / INTRO FLOW =====
+        
+
+        
+        # ===== GREETING/INTRO FLOW =====
         if "first_question" in st.session_state and not st.session_state.awaiting_intro:
-            if any(word in user_text.lower() for word in ["yes", "ready", "start", "ok"]):
-                reply = "Great! Please introduce yourself briefly."
+            if any(word in user_text.lower() for word in ["yes", "ready", "start", "ok", "sure", "let's"]):
+                reply = "Perfect! Please introduce yourself briefly."
                 st.session_state.awaiting_intro = True
             else:
-                reply = "No problem. Let me know when you're ready."
-
+                reply = "No worries. Take your time. Ready when you are!"
+        
         elif st.session_state.get("awaiting_intro"):
-            reply = f"Thanks for the introduction. Let's get started. {st.session_state.first_question}"
+            reply = f"Great to meet you! Let's begin. {st.session_state.first_question}"
             st.session_state.q_index = 1
             st.session_state.awaiting_intro = False
-            del st.session_state.first_question        
-     
-
-        # INTERVIEW FLOW
+            del st.session_state.first_question
+        
+        # ===== INTERVIEW FLOW =====
         else:
             idx = st.session_state.q_index
             q_bank = st.session_state.q_bank
-    
-            if idx >= len(q_bank):
-                reply = "Interview complete. Generating report..."
-                pdf = generate_pdf()
+            
+            # Check if interview complete
+            if idx >= len(q_bank) and len(st.session_state.answers) > 0:
+                reply = "Excellent work! Interview complete. Generating your report..."
+                pdf = generate_report()
                 st.session_state.report_ready = True
                 st.session_state.report_file = pdf
-
+            
             else:
-                current_q = q_bank[idx-1]
-                next_q = q_bank[idx] if idx < len(q_bank) else "Done"
-    
+                current_q = q_bank[idx-1] if idx > 0 else q_bank[0]
+                next_q = q_bank[idx] if idx < len(q_bank) else "End"
+                
+                # Score the answer based on three aspects
                 score_prompt = f"""
-                Answer: {user_text}
-                Give score 0 to 5 based on correctness.
-                Only return number.
+                    Question: {current_q}
+                    Answer: {user_text}
+                
+                    Evaluate the answer on a scale of 0-5 for each of these categories:
+                    1. Correctness: Is the technical information accurate?
+                    2. Communication: Is the explanation clear and well-structured?
+                    3. Confidence: Does the tone/content reflect certainty?
+                
+                    Return the result ONLY in this exact format:
+                    Correctness: [score], Communication: [score], Confidence: [score]
                 """
                 
-                score_res = groq_client.chat.completions.create(
-                    model=LLM_MODEL,
-                    messages=[{"role": "user", "content": score_prompt}]
-                )
-                
                 try:
-                    score = int(score_res.choices[0].message.content.strip())
-                except:
-                    score = 3
-
-                st.session_state.answers.append({
-                    "question": current_q,
-                    "answer": user_text,
-                    "score": score
-                })
-    
-                st.session_state.scores.append(score)
-    
-                ai_reply = get_ai_decision(
-                    groq_client,
-                    user_text,
-                    next_q,
-                    st.session_state.chat_history
-                )
+                    score_res = groq_client.chat.completions.create(
+                        model=LLM_MODEL,
+                        messages=[{"role": "user", "content": score_prompt}],
+                        temperature=0.3
+                    )
                 
+                    res_text = score_res.choices[0].message.content.strip()
+    
+                    scores = re.findall(r'\d+', res_text)
+                    scores = [int(s) for s in scores]
+                    
+                    # Teeno aspects ka average (Final Question Score)
+                    question_final_score = round(sum(scores) / 3, 1) if scores else 0
+                
+                
+                    # Save only valid interview answers
+                    if user_text.strip():
+                        st.session_state.answers.append({
+                            "question": current_q,
+                            "answer": user_text.strip(),
+                            #  "score": score
+                            "final_score": question_final_score  
+                        })
+                        
+                        st.session_state.scores.append(question_final_score)
+                
+                except Exception as e:
+                    st.error(f"Scoring Error: {e}")
+                    
+                # Get AI response
+                ai_reply = get_ai_decision(groq_client, user_text, next_q, st.session_state.chat_history)
                 reply = ai_reply
-
-                if next_q.lower() in reply.lower():
+                
+                # Check if moved to next question
+                if next_q.lower() in reply.lower() or "next" in reply.lower():
                     st.session_state.q_index += 1
-                    st.session_state.followup_count = 0 
-
-                # follow-up detect
-                elif any(word in reply.lower() for word in ["why", "how", "example", "explain", "difference"]):
+                    st.session_state.followup_count = 0
+                
+                # Detect follow-up
+                elif any(word in reply.lower() for word in ["why", "how", "example", "explain", "elaborate", "can you"]):
                     st.session_state.followup_count += 1
-                 
-
+                
+                # Max 2 follow-ups, then move on
                 if st.session_state.followup_count >= 2:
-                    reply = f"Alright. {next_q}"
+                    reply = f"Understood. Let's move on. {next_q}"
                     st.session_state.q_index += 1
-                    st.session_state.followup_count = 0       
-    
-        st.session_state.chat_history.append({"role":"assistant","content":reply})
+                    st.session_state.followup_count = 0
+        
+        # Add AI response
+        st.session_state.chat_history.append({"role": "assistant", "content": reply})
         st.session_state.pending_voice = reply
-    
-        st.rerun()                  
+        # st.session_state.mic_counter += 1  # 🔥 important
+        
+        st.rerun()
 
+
+# ================== MAIN APP ==================
 def main():
-    st.set_page_config(page_title="Voice Agent", layout="centered")
-
-    st.title("🎙️ AI-Powered Voice-Based Interview Assistant")
+    st.set_page_config(
+        page_title="🎙️ AI-Powered Voice-Based Interview Assistant",
+        page_icon="🎤",
+        layout="centered"
+    )
     
-    # State Init
+    # Custom CSS
+    st.markdown("""
+    <style>
+        .main {
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+        }
+        .stButton > button {
+            border-radius: 10px;
+            font-weight: 600;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    st.title("🎙️ AI Voice Interview")
+    
+    # Initialize
     init_session()
-
     stt_model, groq_client = load_agent_engines()
-
     
-
-    #  Screens
+    # ===== UPLOAD SCREEN =====
     if not st.session_state.is_started:
         render_upload_screen(groq_client)
-    else:
-        # Voice Trigger
-        if st.session_state.get("pending_voice"):
-            ai_voice_output(st.session_state.pending_voice)
-            st.session_state.pending_voice = None
-        
-        if st.button("🛑 End Interview"):
+        return
+    
+    # ===== INTERVIEW SCREEN =====
+    
+    # Play AI voice if pending
+    if st.session_state.pending_voice:
+        ai_voice_output(st.session_state.pending_voice)
+
+        wait_time = (len(st.session_state.pending_voice) / 10) + 2
+
+        time.sleep(wait_time)
+
+        st.session_state.pending_voice = None
+
+        st.session_state.mic_counter += 1 
+
+        st.rerun()
+    
+    # Control panel
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col1:
+        progress = min(st.session_state.q_index, len(st.session_state.q_bank))
+        total = len(st.session_state.q_bank)
+        st.metric("Progress", f"{progress}/{total}")
+    
+    with col3:
+        if st.button("🛑 End Interview", type="secondary"):
             st.session_state.force_end = True
             st.rerun()
-        # 🛑 FORCE END HANDLE (FIXED)
-        if st.session_state.force_end:
-            st.session_state.chat_history.append({
-                "role": "assistant",
-                "content": "Interview ended. Generating report..."
-            })
+    
+    # Handle force end
+    if st.session_state.force_end:
         
-            pdf = generate_pdf()
-            st.session_state.report_ready = True
-            st.session_state.report_file = pdf
-            st.session_state.pending_voice = "Interview ended. Generating report..."
+        st.session_state.chat_history.append({
+            "role": "assistant",
+            "content": "Interview ended early. Generating report..."
+        })
+        pdf = generate_report()
+        st.session_state.report_ready = True
+        st.session_state.report_file = pdf
+        st.session_state.pending_voice = "Interview ended. Your report is ready."
+        st.session_state.force_end = False
+        st.rerun()
+    
+    st.markdown("---")
+    
+    
+    # 3. AUTOMATIC MIC (AI ke chup hone ke baad)
+    if not st.session_state.report_ready: 
+        if st.session_state.pending_voice is None:
+            st.write("### 🎤 AI is listening... (Speak now)")
+            
+            audio_bytes = audio_recorder(
+                text="Listening...",
+                recording_color="#e74c3c",
+                neutral_color="#3498db",
+                icon_name="microphone",
+                icon_size="2x",
+                pause_threshold=2.5, 
+                sample_rate=16000,
+                auto_start=True,
+                key=f"mic_{st.session_state.mic_counter}" # Unique key for each turn
+            )
+
+        if audio_bytes:
+            process_user_audio(audio_bytes, stt_model, groq_client)
+
+    
+    # ===== DOWNLOAD REPORT =====
+    if st.session_state.report_ready and st.session_state.report_file:
+        st.success("✅ Interview Completed!")
         
-            st.session_state.force_end = False
-            st.rerun()
+        total = sum(st.session_state.scores)
+        maximum = len(st.session_state.scores) * 5
+        percentage = (total / maximum * 100) if maximum > 0 else 0
+        
+        st.metric("Final Score", f"{total}/{maximum}", f"{percentage:.1f}%")
+        
+        with open(st.session_state.report_file, "rb") as f:
+            st.download_button(
+                label="📄 Download Report ",
+                data=f,
+                file_name="interview_report.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                type="primary"
+            )
 
-        # UI & Input
-        audio_input = render_interview_ui() 
- 
-
-        #  Processing Logic
-        process_answer(audio_input, stt_model, groq_client)
-
-        # 📄 Download report
-        if st.session_state.report_ready:
-            with open(st.session_state.report_file, "rb") as f:
-                st.download_button("📄 Download Report", f, file_name="report.pdf")
 
 if __name__ == "__main__":
-    main()   
-
-
+    main()

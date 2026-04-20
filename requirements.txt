@@ -2,6 +2,8 @@ streamlit
 faster-whisper
 groq
 gTTS
+edge-tts
 python-dotenv
 python-docx
 PyPDF2
+audio-recorder-streamlit

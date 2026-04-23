@@ -6,7 +6,7 @@ import tempfile
 import time
 from faster_whisper import WhisperModel
 from groq import Groq
-import asyncio  # Edge-tts ke liye zaroori hai
+import asyncio  
 import edge_tts
 # from gtts import gTTS
 from docx import Document

@@ -6,7 +6,7 @@ import tempfile
 import time
 from faster_whisper import WhisperModel
 from groq import Groq
-import asyncio  
+import asyncio  # Edge-tts ke liye zaroori hai
 import edge_tts
 # from gtts import gTTS
 from docx import Document
@@ -111,7 +111,7 @@ def get_ai_decision(client, user_text, next_q, history):
 
 async def generate_edge_voice(text, output_path):
     """Edge-TTS se high quality audio generate karne wala function"""
-    #  'en-IN-PrabhatNeural' (Male) ya 'en-IN-NeerjaNeural' (Female) use
+    # Aap 'en-IN-PrabhatNeural' (Male) ya 'en-IN-NeerjaNeural' (Female) use kar sakte hain
     communicate = edge_tts.Communicate(text, "en-IN-PrabhatNeural")
     await communicate.save(output_path)
 
@@ -172,7 +172,10 @@ def ai_voice_output(text):
                                 }}
                                 let average = values / bufferLength;
 
-                                
+                                // 🔥 ECHO GUARD LOGIC:
+                                // 1. Bot play ho raha ho
+                                // 2. Echo guard time (600ms) nikal chuka ho
+                                // 3. Volume threshold kaafi high ho (75) - Bina earphone ke liye
                                 if (playbackStarted && Date.now() > echoGuardTime && average > 75) {{ 
                                     console.log("True User Interruption Detected!");
                                     audio.pause();
@@ -218,45 +221,159 @@ def transcribe_audio(stt_model, audio_bytes):
         return text.strip()
     except Exception as e:
         return ""
-
-
-# ================== PDF REPORT ==================
-
+#
+# -------------------- Report Generation Logic --------------------
 def generate_report():
     doc = Document()
-    doc.add_heading('AI Interview Performance Report', 0)
-    
-    # Overall Score Calculation (e.g., 7 / 15)
-    total_obtained = sum(st.session_state.scores)
-    max_possible = len(st.session_state.scores) * 5
-    
-    summary = doc.add_paragraph()
-    run = summary.add_run(f"TOTAL INTERVIEW SCORE: {total_obtained} / {max_possible}")
-    run.bold = True
-    run.font.size = Pt(14)
-    
-    doc.add_paragraph("_" * 40)
-    doc.add_heading('Detailed Evaluation:', level=1)
+    doc.add_heading('AI Interview: Final Performance Report', 0)
 
-    if not st.session_state.answers:
-        doc.add_paragraph("No questions were answered.")
-    else:
-        for i, item in enumerate(st.session_state.answers):
-            # Question
-            q = doc.add_paragraph()
-            q.add_run(f"Question {i+1}: ").bold = True
-            q.add_run(item['question'])
+    client = Groq(api_key=GROQ_API_KEY)
+    
+    # --- SECTION 1: CHAT CONVERSATION ---
+    doc.add_heading('Interview Conversation:', level=1)
+    transcript_text = ""
+    for message in st.session_state.chat_history:
+        
+        if message['role'] == "system": 
+            continue
+        p = doc.add_paragraph()
+        role_label = "Interviewer (Bot): " if message['role'] == "assistant" else "Candidate (User): "
+        transcript_text += f"{role_label}{message['content']}\n"
+        run = p.add_run(f"{role_label}{message['content']}")
+    
+        if message['role'] == "assistant": 
+            run.bold = True
+        else:
+            run.bold = False
+
+    doc.add_page_break() 
+
+
+    # --- SECTION 2: TECHNICAL SCORING (Performing Scoring Here) ---
+    doc.add_heading('Technical Performance Evaluation', level=1)
+    table = doc.add_table(rows=1, cols=3)
+    table.style = 'Light Grid Accent 1'
+    hdr_cells = table.rows[0].cells
+    hdr_cells[0].text = 'Question'; hdr_cells[1].text = 'Evaluation'; hdr_cells[2].text = 'Score'
+
+    calculated_scores = []
+
+    for item in st.session_state.answers:
+        score_prompt = f"""
+             As a Senior Technical Lead, strictly evaluate this candidate's response.
+             
+             Question: {item['question']}
+             Answer: {item['answer']}
+         
+             Evaluate the answer on a scale of 0-5 for each of these categories:
+             1. Technical Correctness: Give 5 only if the answer is 100% accurate and covers core concepts. Give 0-1 for vague or "I don't know" type answers.
+             2. Depth & Details: Did they explain 'why' and 'how', or just gave a surface-level definition?
+             3. Professional Terminology: Did they use correct industry keywords?
+             4. Communication & Confidence: Clarity and professional delivery.
+         
+             PENALTY RULES:
+             - Deduct 2 points if the answer is too short (under 10 words) even if correct.
+             - Give 0 for technically wrong facts, no partial marks for "trying".
+         
+             Return ONLY in this exact format:
+             Correctness: [score], Depth: [score], Keywords: [score], Communication: [score]
+        """
+
+        try:
+            res = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[{"role": "system", "content": "You are a strict technical interviewer. Return only numeric scores."},
+                          {"role": "user", "content": score_prompt}],
+                temperature=0.1
+            )
+            res_text = res.choices[0].message.content
+            digits = [int(s) for s in re.findall(r'\d+', res_text)]
             
-            # User Answer
-            a = doc.add_paragraph()
-            a.add_run(f"Your Answer: ").bold = True
-            a.add_run(item['answer'])
-            
-            # Score
-            s = doc.add_paragraph()
-            s.add_run(f"Score: {item['final_score']} / 5").italic = True
-            
-            doc.add_paragraph("-" * 30)
+            if len(digits) >= 4:
+                q_score = round(sum(digits[:4]) / 4, 1)
+            elif len(digits) > 0:
+                q_score = round(sum(digits) / len(digits), 1)
+            else:
+                q_score = 0.0
+        except Exception as e:
+            print(f"Error scoring: {e}")
+            q_score = 0.0
+
+        calculated_scores.append(q_score)
+
+        # Table Fill
+        row_cells = table.add_row().cells
+        row_cells[0].text = item['question']
+        row_cells[1].text = "Technical assessment completed"
+        row_cells[2].text = f"{q_score} / 5"
+
+    st.session_state.scores = calculated_scores    
+
+    # --- SECTION 3: CONVERSATION SKILLS SCORING ---
+    doc.add_heading('2. Communication & Soft Skills Analysis', level=1)
+    
+    conv_prompt = f"""
+    Analyze the following interview transcript and provide a score (0-10) for Communication Skills, 
+    Professionalism, and Confidence. Also provide a 2-line summary of their soft skills.
+    
+    Transcript:
+    {transcript_text}
+    
+    Format:
+    Score: [Total out of 10]
+    Feedback: [Your analysis]
+    """
+    
+    try:
+        res = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "system", "content": "You are a senior HR manager."},
+                      {"role": "user", "content": conv_prompt}],
+            temperature=0.3
+        )
+        conv_analysis = res.choices[0].message.content
+        doc.add_paragraph(conv_analysis)
+        # Extracting a numeric score for calculation (assuming format "Score: 8")
+        conv_score = int(re.search(r'Score:\s*(\d+)', conv_analysis).group(1)) if re.search(r'Score:\s*(\d+)', conv_analysis) else 7
+    except:
+        conv_score = 7 # Default if AI fails
+        doc.add_paragraph("Soft skills evaluation: Professional and clear communication observed.")
+
+    
+    # --- COMPLETE SUMMARY & FINAL TOTAL SCORE ---
+    doc.add_heading(' Executive Summary:', level=1)
+    total_obtained = sum(calculated_scores)
+    max_possible = len(calculated_scores) * 5
+
+    percentage = (total_obtained / max_possible * 100) if max_possible > 0 else 0
+    conv_percent = (conv_score / 10 * 100)
+    final_weighted_score = (percentage * 0.7) + (conv_percent * 0.3)
+
+    # # Summary Logic based on score
+    # if percentage >= 80:
+    #     performance_level = "EXCELLENT"
+    #     remarks = "The candidate shows strong technical command and clear communication. Highly recommended."
+    # elif percentage >= 60:
+    #     performance_level = "GOOD"
+    #     remarks = "The candidate has a solid foundation but could improve on technical depth in certain areas."
+    # else:
+    #     performance_level = "NEEDS IMPROVEMENT"
+    #     remarks = "The candidate struggled with core concepts. Further training or review is suggested."
+    # doc.add_paragraph("\n") # Space
+
+    summary_p = doc.add_paragraph()
+    summary_p.add_run(f"FINAL INTERVIEW SCORE: {total_obtained} / {max_possible}").bold = True
+    summary_p.add_run(f"\nPERCENTAGE: {percentage:.1f}%").bold = True
+    summary_p.add_run(f"\nCommunication Score: {conv_percent:.1f}%").bold = True
+    summary_p.add_run(f"\n\nOVERALL INTERVIEW RATING: {final_weighted_score:.1f}%").bold = True
+    # summary_p.add_run(f"\nPERFORMANCE STATUS: {performance_level}").bold = True
+    
+    status = "SELECTED" if final_weighted_score >= 75 else "RE-EVALUATE" if final_weighted_score >= 50 else "REJECTED"
+    summary_p.add_run(f"\nRESULT: {status}").bold = True
+
+    # Feedback basis on percentage
+    # doc.add_heading('Interviewer Remarks:', level=2)
+    # doc.add_paragraph(remarks)
 
     file_path = "interview_report.docx"
     doc.save(file_path)
@@ -279,7 +396,9 @@ def init_session():
         "force_end": False,
         "followup_count": 0,
         "pending_voice": None,
-        "last_audio_id": None
+        "last_audio_id": None,
+        "pause_count": 0,  
+        "is_paused_state": False
     }
     
     for key, value in defaults.items():
@@ -325,10 +444,11 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
         return
     st.session_state.last_audio_id = audio_id
     
-    with st.spinner("🎯 Listening..."):
+    with st.spinner("🎯 Processing your response..."):
         user_text = transcribe_audio(stt_model, audio_bytes)
 
         if not user_text or len(user_text) < 3:
+            st.warning("⚠️ Could not hear clearly. Please try again.")
             st.session_state.last_audio_id = None
             return
 
@@ -338,10 +458,58 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
         idx = st.session_state.q_index
         q_bank = st.session_state.q_bank
         current_q = q_bank[idx-1] if idx > 0 else (st.session_state.first_question if "first_question" in st.session_state else "")
+        
+        
+        # --------------------- PAUSE LOGIC -----------------------
+        
+        is_greeting_reply = any(word in user_text.lower() for word in ["yes", "ready", "ok", "sure", "start"])
 
+        if len(user_text.split()) < 4 and not is_greeting_reply and not st.session_state.get("is_paused_state"):
+            st.session_state.pause_count += 1
+            if st.session_state.pause_count == 1:
+                reply = "I noticed a silence. Do you need a moment to think, or should we move to the next question?"
+                st.session_state.is_paused_state = True
+            elif st.session_state.pause_count == 2:
+                reply = "I again noticed a silence. No problem, take your time to collect your thoughts. I'm still listening."
+                st.session_state.is_paused_state = True
+
+            elif st.session_state.pause_count >= 3:
+                next_q = q_bank[idx] if idx < len(q_bank) else "the end of our interview"
+                reply = f"I'm sorry, but we have already spent quite some time here. To ensure we cover everything, I'm moving to the next question. {next_q}"
+                st.session_state.q_index += 1
+                st.session_state.pause_count = 0 
+                
+            st.session_state.chat_history.append({"role": "assistant", "content": reply})
+            st.session_state.pending_voice = reply
+            # status_placeholder.empty()
+            st.rerun()
+
+        if st.session_state.get("is_paused_state"):
+            st.session_state.is_paused_state = False 
+            
+            if any(word in user_text.lower() for word in ["time", "wait", "minute", "ruko", "hold"]):
+                reply = "Sure, take your time. Let me know when you are ready to continue with the question."
+                st.session_state.chat_history.append({"role": "assistant", "content": reply})
+                st.session_state.pending_voice = reply
+                # status_placeholder.empty()
+                st.rerun()
+            
+            elif any(word in user_text.lower() for word in ["next", "skip", "aage"]):
+                next_q = q_bank[idx] if idx < len(q_bank) else "End"
+                reply = f"No problem. Let's move on. {next_q}"
+                st.session_state.q_index += 1
+                st.session_state.pause_count = 0
+                st.session_state.chat_history.append({"role": "assistant", "content": reply})
+                st.session_state.pending_voice = reply
+                # status_placeholder.empty()
+                st.rerun()
+            
+
+        # ==========================================
         # FLOW CONTROL: GREETING & INTRO
+        # ==========================================
         if "first_question" in st.session_state and not st.session_state.awaiting_intro:
-            if any(word in user_text.lower() for word in ["yes", "ready", "start", "ok", "sure", "chalo"]):
+            if is_greeting_reply:
                 reply = "Perfect! Please introduce yourself briefly."
                 st.session_state.awaiting_intro = True
             else:
@@ -361,15 +529,16 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
             st.session_state.pending_voice = reply
             st.rerun()
 
-        # INTERRUPTION DETECTION (Crucial Part)
-        # Check if the input is a short comment or a question about the process
+        # ==========================================
+        # 2. INTERRUPTION DETECTION (Crucial Part)
+        # ==========================================
+        
         word_count = len(user_text.split())
         interruption_keywords = ["repeat", "wait", "pardon", "sorry", "minute", "slow", "understand", "again", "kya"]
         
         is_interruption = word_count < 8 or any(kw in user_text.lower() for kw in interruption_keywords)
 
         if is_interruption:
-            
             interruption_prompt = f"""
             The user interrupted with: "{user_text}". 
             Context: We are currently on this interview question: "{current_q}".
@@ -391,63 +560,29 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
             st.session_state.pending_voice = reply
             st.rerun()
 
+        # ==========================================
         #  TECHNICAL ANSWER PROCESSING (Report Impact)
-        
+        # ==========================================
         else:
             # Check if interview complete
             if idx > len(q_bank):
                 reply = "Interview is already complete. Generating your report..."
                 st.session_state.report_ready = True
+           
             else:
-                
-                score_prompt = f"""
-                    Question: {current_q}
-                    Answer: {user_text}
-
-
-                    Evaluate the answer on a scale of 0-5 for each of these categories:
-                    1. Correctness: Is the technical information accurate?
-                    2. Communication: Is the explanation clear and well-structured?
-                    3. Confidence: Does the tone/content reflect certainty?
-                
-                    Return the result ONLY in this exact format:
-                    Correctness: [score], Communication: [score], Confidence: [score]
-                 """
-
-                try:
-                    score_res = groq_client.chat.completions.create(
-                        model=LLM_MODEL,
-                        messages=[{"role": "system", "content": "You are a strict technical interviewer."},
-                                  {"role": "user", "content": score_prompt}],
-                        temperature=0.3
-                    )
-                    res_text = score_res.choices[0].message.content.strip()
-                    scores = [int(s) for s in re.findall(r'\d+', res_text)]
-
-                    q_final_score = round(sum(scores) / 3, 1) if scores else 0
-                    
-                    # FIX: Check if this question is already answered to avoid duplicates
-                    existing_q_index = next((i for i, a in enumerate(st.session_state.answers) if a["question"] == current_q), None)
+                existing_q_index = next((i for i, a in enumerate(st.session_state.answers) if a["question"] == current_q), None)
   
-                    # if existing_q_index is not None:
-                    #     # Agar question pehle se hai (Follow-up case), toh answer merge karein
-                    #     st.session_state.answers[existing_q_index]["answer"] += f" | Follow-up: {user_text.strip()}"
-                    #     st.session_state.answers[existing_q_index]["final_score"] = round((st.session_state.answers[existing_q_index]["final_score"] + q_final_score) / 2, 1)
-
-                    # Save only valid interview answers
-                    if user_text.strip():
-                        st.session_state.answers.append({
-                            "question": current_q,
-                            "answer": user_text.strip(),
-                            "final_score": q_final_score  
-                        })
-                        
-                        st.session_state.scores.append(q_final_score)
+                if existing_q_index is not None:
+                    st.session_state.answers[existing_q_index]["answer"] += f" | Follow-up: {user_text.strip()}"
                 
-                except Exception as e:
-                    st.error(f"Scoring Error: {e}")
-
-            
+                else:
+                    st.session_state.answers.append({
+                        "question": current_q,
+                        "answer": user_text.strip(),
+                        "final_score": 0.0  
+                    })
+               
+                # --- NEXT STEP DECISION ---
                 next_q = q_bank[idx] if idx < len(q_bank) else "End"
                 ai_reply = get_ai_decision(groq_client, user_text, next_q, st.session_state.chat_history)
                 
@@ -479,7 +614,6 @@ def main():
         layout="centered"
     )
     
-    # Custom CSS
     st.markdown("""
     <style>
         .main {
@@ -503,21 +637,17 @@ def main():
         render_upload_screen(groq_client)
         return
     
-    # ===== INTERVIEW SCREEN =====
-    
-    # Play AI voice if pending
+
     if st.session_state.pending_voice:
         ai_voice_output(st.session_state.pending_voice)
-
         wait_time = (len(st.session_state.pending_voice) / 10) + 2
-  
+
         time.sleep(wait_time)
 
         st.session_state.pending_voice = None
 
-        st.session_state.mic_counter += 1 # Ab mic refresh hoga
+        st.session_state.mic_counter += 1 
 
-        
         st.rerun()
     
     # Control panel
@@ -545,14 +675,13 @@ def main():
         st.session_state.pending_voice = "Interview ended. Your report is ready."
         st.session_state.force_end = False
         st.rerun()
-    
-    
+        
     st.markdown("---")
     
     if not st.session_state.report_ready: 
         if st.session_state.pending_voice is None:
             st.write("### 🎤 AI is listening... (Speak now)")
-            
+           
             audio_bytes = audio_recorder(
                 text="Listening...",
                 recording_color="#e74c3c",
@@ -570,7 +699,12 @@ def main():
 
     
     # ===== DOWNLOAD REPORT =====
-    if st.session_state.report_ready and st.session_state.report_file:
+    if st.session_state.report_ready:
+        
+        if not st.session_state.report_file:
+            with st.spinner("Calculating final scores and generating report..."):
+                st.session_state.report_file = generate_report()
+        
         st.success("✅ Interview Completed!")
         
         total = sum(st.session_state.scores)

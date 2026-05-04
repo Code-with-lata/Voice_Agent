@@ -12,7 +12,7 @@ import edge_tts
 from docx import Document
 import PyPDF2
 from dotenv import load_dotenv
-from docx.shared import 
+from docx.shared import pt
 from audio_recorder_streamlit import audio_recorder
 
 

@@ -173,10 +173,7 @@ def ai_voice_output(text):
                                 }}
                                 let average = values / bufferLength;
 
-                                // 🔥 ECHO GUARD LOGIC:
-                                // 1. Bot play ho raha ho
-                                // 2. Echo guard time (600ms) nikal chuka ho
-                                // 3. Volume threshold kaafi high ho (75) - Bina earphone ke liye
+                                
                                 if (playbackStarted && Date.now() > echoGuardTime && average > 75) {{ 
                                     console.log("True User Interruption Detected!");
                                     audio.pause();

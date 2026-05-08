@@ -12,7 +12,7 @@ import edge_tts
 from docx import Document
 import PyPDF2
 from dotenv import load_dotenv
-from docx.shared import pt
+from docx.shared import Pt
 from audio_recorder_streamlit import audio_recorder
 
 
@@ -74,7 +74,7 @@ def extract_questions_from_file(uploaded_file):
 # ================== VOICE FUNCTIONS ==================
 @st.cache_resource
 def load_agent_engines():
-    stt = WhisperModel("base", device="cpu", compute_type="int8")
+    stt = WhisperModel("medium", device="cpu", compute_type="int8")
     
     client = Groq(api_key=GROQ_API_KEY)
     return stt, client
@@ -96,9 +96,26 @@ def get_ai_decision(client, user_text, next_q, history):
                 next question: "{next_q}"
 
                 INSTRUCTION: 
-                - Briefly validate if the answer is correct (DON'T repeat it).
-                - If the answer is good, ask the Next Scheduled Question.
-                - If the answer is technically flawed or too short, ask a specific follow-up about that topic.
+                1. If answer is correct:
+                - briefly appreciate
+                - ask next interview question
+                
+                2. If answer is partially correct:
+                - ask a follow-up question
+                
+                3. If candidate says:
+                - "don't know"
+                - "no idea"
+                - silence
+                THEN:
+                - encourage briefly
+                - move to next question
+                
+                IMPORTANT:
+                - NEVER explain the answer yourself
+                - NEVER teach concepts
+                - NEVER give definitions
+                - Keep response under 25 words
 
                 
                 """
@@ -173,8 +190,9 @@ def ai_voice_output(text):
                                 }}
                                 let average = values / bufferLength;
 
+                                // ECHO GUARD LOGIC:
                                 
-                                if (playbackStarted && Date.now() > echoGuardTime && average > 75) {{ 
+                                if (playbackStarted && Date.now() > echoGuardTime && average > 55) {{ 
                                     console.log("True User Interruption Detected!");
                                     audio.pause();
                                     status.innerHTML = "⏹️ Bot stopped (Interrupted)";
@@ -200,7 +218,10 @@ def ai_voice_output(text):
         st.components.v1.html(audio_html, height=60)
         
         if os.path.exists(temp_name):
-            os.remove(temp_name)
+            try:
+                os.remove(temp_name)
+            except:
+                pass
             
     except Exception as e:
         st.error(f"Edge-Voice Error: {e}")
@@ -212,7 +233,15 @@ def transcribe_audio(stt_model, audio_bytes):
             tmp.write(audio_bytes)
             tmp.flush()
             
-            segments, _ = stt_model.transcribe(tmp.name)
+            segments, info = stt_model.transcribe(
+                tmp.name,
+                beam_size=5,
+                best_of=5,
+                language="en",
+                temperature=0,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=500),
+            )
             text = " ".join([s.text for s in segments])
             
         os.remove(tmp.name)
@@ -261,7 +290,8 @@ def generate_report():
         
         answer_text = item['answer'] if item else ""
 
-        if answer_text in ["...", ".", ""] or len(answer_text.split()) < 3:
+        # ❌ Invalid answer → direct 0
+        if answer_text in ["...", ".", ""]: 
             q_score = 0.0
             
         else:
@@ -314,7 +344,7 @@ def generate_report():
 
     st.session_state.scores = calculated_scores    
 
-    # --- CONVERSATION SKILLS SCORING ---
+    # ---  CONVERSATION SKILLS SCORING ---
     doc.add_heading('2. Communication & Soft Skills Analysis', level=1)
     
     conv_prompt = f"""
@@ -338,6 +368,7 @@ def generate_report():
         )
         conv_analysis = res.choices[0].message.content
         doc.add_paragraph(conv_analysis)
+        # Extracting a numeric score for calculation (assuming format "Score: 8")
         comm = re.search(r'Communication.*?(\d+)/10', conv_analysis, re.IGNORECASE)
         prof = re.search(r'Professionalism.*?(\d+)/10', conv_analysis, re.IGNORECASE)
         conf = re.search(r'Confidence.*?(\d+)/10', conv_analysis, re.IGNORECASE)
@@ -351,11 +382,11 @@ def generate_report():
         if conf:
             scores.append(int(conf.group(1)))
     
-        
+        # Final average score
         if scores:
-            conv_score = sum(scores) / len(scores)   # out of 10
+            conv_score = sum(scores) / len(scores)  
         else:
-            conv_score = 7  
+            conv_score = 7 
     except Exception as e:
         conv_score = 7 
         doc.add_paragraph("Soft skills evaluation: Professional and clear communication observed.")
@@ -384,7 +415,7 @@ def generate_report():
     # doc.add_paragraph("\n") # Space
 
     summary_p = doc.add_paragraph()
-    summary_p.add_run(f"FINAL INTERVIEW SCORE: {total_obtained} / {max_possible}").bold = True
+    summary_p.add_run(f"FINAL INTERVIEW SCORE: {total_obtained:.1f} / {max_possible}").bold = True
     summary_p.add_run(f"\nPERCENTAGE: {percentage:.1f}%").bold = True
     summary_p.add_run(f"\nCommunication Score: {conv_percent:.1f}%").bold = True
     summary_p.add_run(f"\n\nOVERALL INTERVIEW RATING: {final_weighted_score:.1f}%").bold = True
@@ -421,8 +452,9 @@ def init_session():
         "last_audio_id": None,
         "pause_count": 0,  
         "is_paused_state": False,
-        "current_question": "",
+        "current_question": None,
         "last_response_time": time.time()
+        
     }
     
     for key, value in defaults.items():
@@ -462,7 +494,6 @@ def render_upload_screen(groq_client):
 def process_user_audio(audio_bytes, stt_model, groq_client):
     """Process user's audio: Distinguish between technical answers and interruptions"""
     
-    # Unique ID for session management
     audio_id = hash(audio_bytes)
     if audio_id == st.session_state.last_audio_id:
         return
@@ -471,6 +502,7 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
     with st.spinner("🎯 Processing your response..."):
         user_text = transcribe_audio(stt_model, audio_bytes)
 
+        # FIX: silence handling
         if not user_text or len(user_text.strip()) == 0:
             user_text = "..."
 
@@ -479,19 +511,17 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
         # Current Question tracker
         idx = st.session_state.q_index
         q_bank = st.session_state.q_bank
-        # current_q = q_bank[idx-1] if idx > 0 else (st.session_state.first_question if "first_question" in st.session_state else "")
-        current_q = st.session_state.get("current_question", "")
+        current_q = st.session_state.current_question
         
         # --------------------- PAUSE LOGIC -----------------------
-    
-        if user_text == "..." or len(user_text.split()) < 3:
+        
+        if user_text.strip() in ["", "..."]:
             st.session_state.pause_count += 1
             if st.session_state.pause_count == 1:
                 reply = "I noticed a silence. Do you need a moment to think, or should we move to the next question?"
                 
             elif st.session_state.pause_count == 2:
                 reply = "I again noticed a silence. No problem, take your time to collect your thoughts. I'm still listening."
-                
 
             elif st.session_state.pause_count >= 3:
                 next_q = q_bank[idx] if idx < len(q_bank) else "the end of our interview"
@@ -510,22 +540,31 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
         st.session_state.pause_count = 0    
 
         
-        # ----------------- FLOW CONTROL: GREETING & INTRO -----------------
+        # ---------- FLOW CONTROL: GREETING & INTRO----------------------
        
-        is_greeting_reply = any(word in user_text.lower() for word in ["yes", "ready", "ok", "sure", "start"])
+        user_words = user_text.lower().split()
+        positive_reply = any(word in user_text.lower() for word in [
+            "yes", "ready", "ok", "sure", "start"
+        ])
+        
+        negative_reply = any(word in user_text.lower() for word in [
+            "no", "not now", "later"
+        ]) or "not now" in user_text.lower()
 
         if "first_question" in st.session_state and not st.session_state.awaiting_intro:
-            if is_greeting_reply:
+            if positive_reply:
                 reply = "Perfect! Please introduce yourself briefly."
                 st.session_state.awaiting_intro = True
-            else:
+            elif negative_reply:
                 reply = "No worries. Take your time. Tell me when you're ready to start!"
-            
+            else:
+                reply = "Please say yes whenever you're ready to begin."
+
             st.session_state.chat_history.append({"role": "assistant", "content": reply})
             st.session_state.pending_voice = reply
             st.rerun()
 
-        if st.session_state.get("awaiting_intro"):
+        if st.session_state.get("awaiting_intro") and len(user_text.split()) > 3:
             q = st.session_state.first_question
             st.session_state.current_question = q
             reply = f"Great to meet you! Let's jump into the first question. {q}"
@@ -538,12 +577,12 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
             st.rerun()
 
         
-        # ------------------- INTERRUPTION DETECTION (Crucial Part) --------------------
+        # ---------------------- INTERRUPTION DETECTION ------------------
         
         word_count = len(user_text.split())
         interruption_keywords = ["repeat", "wait", "pardon", "sorry", "minute", "slow", "understand", "again", "kya"]
         
-        is_interruption = word_count <= 2 or any(kw in user_text.lower() for kw in interruption_keywords)
+        is_interruption = word_count <= 3 and any(kw in user_text.lower() for kw in interruption_keywords)
 
         if is_interruption:
             interruption_prompt = f"""
@@ -567,24 +606,27 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
             st.session_state.pending_voice = reply
             st.rerun()
 
-        # ==========================================
-        #  TECHNICAL ANSWER PROCESSING (Report Impact)
-        # ==========================================
-        # else:
+        
+        # ---------------------- TECHNICAL ANSWER PROCESSING (Report Impact)-----------------
+        
         # Check if interview complete
-        if idx > len(q_bank):
+        if idx >= len(q_bank):
             reply = "Interview is already complete. Generating your report..."
             st.session_state.report_ready = True
         
         else:
             clean_answer = user_text.strip()
 
-            if clean_answer not in ["...", ".", ""] and len(clean_answer.split()) >= 3:
+            if clean_answer not in ["...", ".", ""]:  
                 existing_q_index = next((i for i, a in enumerate(st.session_state.answers) if a["question"] == current_q), None)
     
                 if existing_q_index is not None:
-                    st.session_state.answers[existing_q_index]["answer"] += f" | Follow-up: {clean_answer}"
-                
+                    # st.session_state.answers[existing_q_index]["answer"] += f" | Follow-up: {clean_answer}"
+                    old_answer = st.session_state.answers[existing_q_index]["answer"]
+
+                    st.session_state.answers[existing_q_index]["answer"] = (
+                        old_answer + " " + clean_answer
+                    )
                 else:
                     st.session_state.answers.append({
                         "question": current_q,
@@ -597,8 +639,7 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
             ai_reply = get_ai_decision(groq_client, user_text, next_q, st.session_state.chat_history)
             
             # Check if moving forward
-            
-            if st.session_state.followup_count >= 1:    
+            if st.session_state.followup_count >= 1 or "next question" in ai_reply.lower():    
                 st.session_state.q_index += 1
                 st.session_state.followup_count = 0
                 

@@ -719,7 +719,6 @@ def main():
             st.session_state.force_end = True
             st.rerun()
     
-    # Handle force end
     if st.session_state.force_end:
         
         st.session_state.chat_history.append({

@@ -288,31 +288,59 @@ def generate_report():
     for q in st.session_state.q_bank:
         item = next((a for a in st.session_state.answers if a["question"] == q), None)
         
-        answer_text = item['answer'] if item else ""
+        if item:
+            main_answer = item.get("main_answer", "")
+            followups = item.get("followups", [])
+        
+            answer_text = (
+                main_answer +
+                "\nFollow-up Responses:\n" +
+                "\n".join(followups)
+            )
+        else:
+            answer_text = ""
 
         # ❌ Invalid answer → direct 0
-        if answer_text in ["...", ".", ""]: 
+        word_count = len(answer_text.split())
+        if answer_text.strip() in ["...", ".", ""]: # or len(answer_text.split()) < 3:
             q_score = 0.0
             
         else:
             score_prompt = f"""
-                As a Senior Technical Lead, strictly evaluate this candidate's response.
+                You are a STRICT senior technical interviewer.
                 
-                Question: {q}
-                Answer: {answer_text}
-            
-                Evaluate the answer on a scale of 0-5 for each of these categories:
-                1. Technical Correctness: Give 5 only if the answer is 100% accurate and covers core concepts. Give 0-1 for vague or "I don't know" type answers.
-                2. Depth & Details: Did they explain 'why' and 'how', or just gave a surface-level definition?
-                3. Professional Terminology: Did they use correct industry keywords?
-                4. Communication & Confidence: Clarity and professional delivery.
-            
-                PENALTY RULES:
-                - Deduct 2 points if the answer is too short (under 10 words) even if correct.
-                - Give 0 for technically wrong facts, no partial marks for "trying".
-            
-                Return ONLY in this exact format:
-                Correctness: [score], Depth: [score], Keywords: [score], Communication: [score]
+                QUESTION:
+                {q}
+                
+                CANDIDATE ANSWER:
+                {answer_text}
+                
+                STRICT SCORING RULES:
+                
+                - Give HIGH scores ONLY if technically deep and accurate.
+                - Surface-level answers MUST score low.
+                - Wrong technical facts = 0.
+                - Short answers (<15 words) cannot score above 2.
+                - If answer lacks examples, reasoning, implementation details,
+                  edge cases, or practical understanding, reduce Depth score.
+                - Avoid generosity.
+                
+                Evaluate from 0-5 in these categories:
+                
+                1. Technical Correctness
+                2. Depth & Understanding
+                3. Technical Terminology
+                4. Communication Clarity
+                
+                Also provide a 1-line professional evaluation.
+                
+                Return EXACTLY in this format:
+                
+                Correctness: X
+                Depth: X
+                Keywords: X
+                Communication: X
+                Evaluation: your feedback
             """
     
             try:
@@ -323,23 +351,38 @@ def generate_report():
                     temperature=0.1
                 )
                 res_text = res.choices[0].message.content
-                digits = [int(s) for s in re.findall(r'\d+', res_text)]
+                scores = re.findall(
+                    r'Correctness:\s*(\d).*?Depth:\s*(\d).*?Keywords:\s*(\d).*?Communication:\s*(\d)',
+                    res_text,
+                    re.IGNORECASE | re.DOTALL
+                )
+                evaluation_match = re.search(
+                    r'Evaluation:\s*(.*)',
+                    res_text,
+                    re.IGNORECASE | re.DOTALL
+                )
                 
-                if len(digits) >= 4:
-                    q_score = round(sum(digits[:4]) / 4, 1)
-                elif len(digits) > 0:
-                    q_score = round(sum(digits) / len(digits), 1)
+                if scores:
+                        nums = list(map(int, scores[0]))
+                        q_score = round(sum(nums) / 4, 1)
                 else:
                     q_score = 0.0
+
+                evaluation_text = (
+                    evaluation_match.group(1).strip()
+                    if evaluation_match
+                    else "Evaluation completed."
+                ) 
             except Exception as e:
                 print(f"Error scoring: {e}")
                 q_score = 0.0
+                evaluation_text = "Evaluation failed."
     
             calculated_scores.append(q_score)
     
             row_cells = table.add_row().cells
             row_cells[0].text = q
-            row_cells[1].text = "Technical assessment completed"
+            row_cells[1].text = evaluation_text #"Technical assessment completed"
             row_cells[2].text = f"{q_score} / 5"
 
     st.session_state.scores = calculated_scores    
@@ -348,15 +391,28 @@ def generate_report():
     doc.add_heading('2. Communication & Soft Skills Analysis', level=1)
     
     conv_prompt = f"""
-    Analyze the following interview transcript and provide a score (0-10) for Communication Skills, 
-    Professionalism, and Confidence. Also provide a 2-line summary of their soft skills.
-    
-    Transcript:
-    {transcript_text}
-    
-    Format:
-    Score: [Total out of 10]
-    Feedback: [Your analysis]
+        Analyze the following interview transcript.
+        
+        TRANSCRIPT:
+        {transcript_text}
+        
+        Evaluate the candidate on:
+        
+        1. Communication Skills
+        2. Professionalism
+        3. Confidence
+        
+        SCORING RULES:
+        - Be strict and realistic
+        - Poor communication should score low
+        - Hesitation, silence, or vague speaking should reduce score
+        
+        Return EXACTLY in this format:
+        
+        Communication: X/10
+        Professionalism: X/10
+        Confidence: X/10
+        Feedback: your detailed analysis
     """
     
     try:
@@ -386,9 +442,9 @@ def generate_report():
         if scores:
             conv_score = sum(scores) / len(scores)  
         else:
-            conv_score = 7 
+            conv_score = 5 
     except Exception as e:
-        conv_score = 7 
+        conv_score = 5 
         doc.add_paragraph("Soft skills evaluation: Professional and clear communication observed.")
 
     
@@ -591,6 +647,8 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
             
             INSTRUCTION:
             - Give a very short, human-like response to their interruption (under 10 words).
+            - Repeat the SAME current question again
+            - Do NOT ask a new question
             - Then, politely ask them to continue with the current question.
             - DO NOT evaluate this as a technical answer.
             """
@@ -600,7 +658,9 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
                 messages=[{"role": "system", "content": interruption_prompt}],
                 temperature=0.6
             )
-            reply = response.choices[0].message.content
+            short_reply = response.choices[0].message.content
+
+            reply = f"{short_reply}\n\n{current_q}"
             
             st.session_state.chat_history.append({"role": "assistant", "content": reply})
             st.session_state.pending_voice = reply
@@ -622,15 +682,14 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
     
                 if existing_q_index is not None:
                     # st.session_state.answers[existing_q_index]["answer"] += f" | Follow-up: {clean_answer}"
-                    old_answer = st.session_state.answers[existing_q_index]["answer"]
-
-                    st.session_state.answers[existing_q_index]["answer"] = (
-                        old_answer + " " + clean_answer
+                    st.session_state.answers[existing_q_index]["followups"].append(
+                        clean_answer
                     )
                 else:
                     st.session_state.answers.append({
                         "question": current_q,
                         "answer": clean_answer,
+                        "followups": [],
                         "final_score": 0.0  
                     })
            

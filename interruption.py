@@ -256,7 +256,7 @@ def generate_report():
 
     client = Groq(api_key=GROQ_API_KEY)
     
-    # ---  CHAT CONVERSATION ---
+    # ------------------  CHAT CONVERSATION ----------------------
     doc.add_heading('Interview Conversation:', level=1)
     transcript_text = ""
     for message in st.session_state.chat_history:

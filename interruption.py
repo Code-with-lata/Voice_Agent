@@ -127,6 +127,122 @@ def get_ai_decision(client, user_text, next_q, history):
     return response.choices[0].message.content
 
 
+# ================== SPEECH CLASSIFIER ==================
+
+def classify_user_input(client, text, current_question):
+
+    prompt = f"""
+You are a STRICT real-time AI interview speech classifier.
+
+CURRENT INTERVIEW QUESTION:
+"{current_question}"
+
+USER SPEECH:
+"{text}"
+
+Classify into EXACTLY ONE category:
+
+1. TECHNICAL_ANSWER
+2. INTERRUPTION
+3. BACKGROUND_TALK
+4. NEXT_QUESTION
+
+RULES:
+
+TECHNICAL_ANSWER:
+- Interview-related technical answer
+- Concepts/coding/examples
+- Explanations related to the interview question
+
+INTERRUPTION:
+- Asking to repeat
+- Asking to slow down
+
+Examples:
+- repeat please
+- sorry
+- come again
+- what
+- again
+- can you repeat
+- speak slowly
+
+BACKGROUND_TALK:
+- Talking to someone else
+- Greetings
+- Names
+- Phone calls
+- Side conversations
+
+Examples:
+- hello rahul
+- mummy ek minute
+- phone aa raha hai
+- hold on
+- hello sir
+
+NEXT_QUESTION:
+- User wants to skip current question
+- User wants another question
+- User wants to move ahead
+
+Examples:
+- next question
+- move to next
+- skip this
+- let's continue
+- move ahead
+- go to next question
+- ask another question
+
+IMPORTANT:
+- If user wants another question, ALWAYS return NEXT_QUESTION
+- If unsure, choose BACKGROUND_TALK
+- Return ONLY category name
+- No explanation
+
+Valid outputs:
+TECHNICAL_ANSWER
+INTERRUPTION
+BACKGROUND_TALK
+NEXT_QUESTION
+"""
+
+    try:
+
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a strict speech classifier."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=0
+        )
+
+        result = response.choices[0].message.content.strip()
+
+        valid = [
+            "TECHNICAL_ANSWER",
+            "INTERRUPTION",
+            "BACKGROUND_TALK",
+            "NEXT_QUESTION"
+        ]
+
+        if result not in valid:
+            return "BACKGROUND_TALK"
+
+        return result
+
+    except:
+        return "BACKGROUND_TALK"
+
+
 async def generate_edge_voice(text, output_path):
     """Edge-TTS se high quality audio generate karne wala function"""
     # Aap 'en-IN-PrabhatNeural' (Male) ya 'en-IN-NeerjaNeural' (Female) use kar sakte hain
@@ -548,57 +664,65 @@ def render_upload_screen(groq_client):
 
 
 def process_user_audio(audio_bytes, stt_model, groq_client):
-    """Process user's audio: Distinguish between technical answers and interruptions"""
     
     audio_id = hash(audio_bytes)
     if audio_id == st.session_state.last_audio_id:
         return
     st.session_state.last_audio_id = audio_id
-    
+
     with st.spinner("🎯 Processing your response..."):
+
         user_text = transcribe_audio(stt_model, audio_bytes)
 
         # FIX: silence handling
         if not user_text or len(user_text.strip()) == 0:
             user_text = "..."
 
-        st.session_state.chat_history.append({"role": "user", "content": user_text})
-        
-        # Current Question tracker
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": user_text
+        })
+
         idx = st.session_state.q_index
         q_bank = st.session_state.q_bank
         current_q = st.session_state.current_question
+
         
-        # --------------------- PAUSE LOGIC -----------------------
-        
+        # PAUSE HANDLING FIRST 
+
         if user_text.strip() in ["", "..."]:
+
             st.session_state.pause_count += 1
+
             if st.session_state.pause_count == 1:
                 reply = "I noticed a silence. Do you need a moment to think, or should we move to the next question?"
-                
+
             elif st.session_state.pause_count == 2:
                 reply = "I again noticed a silence. No problem, take your time to collect your thoughts. I'm still listening."
 
-            elif st.session_state.pause_count >= 3:
-                next_q = q_bank[idx] if idx < len(q_bank) else "the end of our interview"
+            else:
+                next_q = q_bank[idx] if idx < len(q_bank) else "Interview completed."
                 reply = f"I'm sorry, but we have already spent quite some time here. To ensure we cover everything, I'm moving to the next question. {next_q}"
-                st.session_state.q_index += 1
-                st.session_state.pause_count = 0 
-                st.session_state.current_question = next_q
-                if st.session_state.q_index < len(q_bank):
-                    st.session_state.current_question = q_bank[st.session_state.q_index]
-                
-            st.session_state.chat_history.append({"role": "assistant", "content": reply})
+
+                st.session_state.pause_count = 0
+
+                if idx < len(q_bank):
+                    st.session_state.q_index += 1
+                    st.session_state.current_question = next_q
+
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": reply
+            })
+
             st.session_state.pending_voice = reply
-            
             st.rerun()
 
-        st.session_state.pause_count = 0    
+        st.session_state.pause_count = 0
 
         
-        # ---------- FLOW CONTROL: GREETING & INTRO----------------------
-       
-        user_words = user_text.lower().split()
+        # INTRO FLOW 
+    
         positive_reply = any(word in user_text.lower() for word in [
             "yes", "ready", "ok", "sure", "start"
         ])
@@ -607,69 +731,114 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
             "no", "not now", "later"
         ]) or "not now" in user_text.lower()
 
-        if "first_question" in st.session_state and not st.session_state.awaiting_intro:
+        if (
+            "first_question" in st.session_state
+            and not st.session_state.awaiting_intro
+            and not st.session_state.get("intro_completed", False)
+            and st.session_state.current_question is None
+        ):
+
             if positive_reply:
                 reply = "Perfect! Please introduce yourself briefly."
                 st.session_state.awaiting_intro = True
             elif negative_reply:
-                reply = "No worries. Take your time. Tell me when you're ready to start!"
+                reply = "No worries. Take your time. Tell me when you're ready to start!"    
             else:
-                reply = "Please say yes whenever you're ready to begin."
+                reply = "Please say yes when you're ready."
 
-            st.session_state.chat_history.append({"role": "assistant", "content": reply})
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": reply
+            })
+
             st.session_state.pending_voice = reply
             st.rerun()
 
         if st.session_state.get("awaiting_intro") and len(user_text.split()) > 3:
+
             q = st.session_state.first_question
             st.session_state.current_question = q
-            reply = f"Great to meet you! Let's jump into the first question. {q}"
             st.session_state.q_index = 1
             st.session_state.awaiting_intro = False
-            del st.session_state.first_question
-            
-            st.session_state.chat_history.append({"role": "assistant", "content": reply})
+            st.session_state.intro_completed = True
+
+            reply = f"Great to meet you! Let's jump into the first question. {q}"
+
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": reply
+            })
+
             st.session_state.pending_voice = reply
             st.rerun()
 
-        
-        # ---------------------- INTERRUPTION DETECTION ------------------
-        
-        word_count = len(user_text.split())
-        interruption_keywords = ["repeat", "wait", "pardon", "sorry", "minute", "slow", "understand", "again", "kya"]
-        
-        is_interruption = word_count <= 3 and any(kw in user_text.lower() for kw in interruption_keywords)
 
-        if is_interruption:
-            interruption_prompt = f"""
-            The user interrupted with: "{user_text}". 
-            Context: We are currently on this interview question: "{current_q}".
-            
-            INSTRUCTION:
-            - Give a very short, human-like response to their interruption (under 10 words).
-            - Repeat the SAME current question again
-            - Do NOT ask a new question
-            - Then, politely ask them to continue with the current question.
-            - DO NOT evaluate this as a technical answer.
-            """
-            
-            response = groq_client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=[{"role": "system", "content": interruption_prompt}],
-                temperature=0.6
-            )
-            short_reply = response.choices[0].message.content
+        speech_type = classify_user_input(
+            groq_client,
+            user_text,
+            current_q
+        )
 
-            reply = f"{short_reply}\n\n{current_q}"
-            
-            st.session_state.chat_history.append({"role": "assistant", "content": reply})
+        # BACKGROUND TALK
+
+        if speech_type == "BACKGROUND_TALK":
+            if idx < len(q_bank):
+                pending_q = q_bank[idx]
+                st.session_state.current_question = pending_q
+        
+                reply = f"Please continue the interview. {pending_q}"
+            else:
+                reply = "Please continue the interview."
+
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": reply
+            })
+
             st.session_state.pending_voice = reply
             st.rerun()
 
+        # INTERRUPTION
+
+        if speech_type == "INTERRUPTION":
+            reply = f"Sure. Let me repeat.\n\n{current_q}"
+
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": reply
+            })
+
+            st.session_state.pending_voice = reply
+            st.rerun()
+
+        # NEXT QUESTION
         
-        # ---------------------- TECHNICAL ANSWER PROCESSING (Report Impact)-----------------
+        if speech_type == "NEXT_QUESTION":
         
-        # Check if interview complete
+            if idx < len(q_bank):
+                
+                next_q = q_bank[idx]
+
+                st.session_state.current_question = next_q
+                
+                st.session_state.q_index += 1
+        
+                reply = f"Sure. {next_q}"
+        
+            else:
+                reply = "Interview completed. Generating your report..."
+                st.session_state.report_ready = True
+        
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": reply
+            })
+        
+            st.session_state.pending_voice = reply
+            st.rerun()
+
+        # TECHNICAL FLOW ONLY
+
         if idx >= len(q_bank):
             reply = "Interview is already complete. Generating your report..."
             st.session_state.report_ready = True
@@ -678,25 +847,27 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
             clean_answer = user_text.strip()
 
             if clean_answer not in ["...", ".", ""]:  
-                existing_q_index = next((i for i, a in enumerate(st.session_state.answers) if a["question"] == current_q), None)
-    
-                if existing_q_index is not None:
-                    # st.session_state.answers[existing_q_index]["answer"] += f" | Follow-up: {clean_answer}"
-                    st.session_state.answers[existing_q_index]["followups"].append(
-                        clean_answer
-                    )
-                else:
-                    st.session_state.answers.append({
-                        "question": current_q,
-                        "answer": clean_answer,
-                        "followups": [],
-                        "final_score": 0.0  
-                    })
-           
-            # --- NEXT STEP DECISION ---
+                existing = next((i for i, a in enumerate(st.session_state.answers) if a["question"] == current_q), None)
+
+            if existing is not None:
+                st.session_state.answers[existing]["followups"].append(user_text)
+            else:
+                st.session_state.answers.append({
+                    "question": current_q,
+                    "main_answer": user_text,
+                    "followups": [],
+                    "final_score": 0.0
+                })
+
             next_q = q_bank[idx] if idx < len(q_bank) else "End"
-            ai_reply = get_ai_decision(groq_client, user_text, next_q, st.session_state.chat_history)
-            
+
+            ai_reply = get_ai_decision(
+                groq_client,
+                user_text,
+                next_q,
+                st.session_state.chat_history
+            )
+
             # Check if moving forward
             if st.session_state.followup_count >= 1 or "next question" in ai_reply.lower():    
                 st.session_state.q_index += 1
@@ -706,8 +877,8 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
                     st.session_state.current_question = q_bank[st.session_state.q_index]
             else:
                 st.session_state.followup_count += 1
-            
-            # Force next question if stuck in follow-ups
+
+
             if st.session_state.followup_count >= 2:
                 ai_reply = f"I see. Let's move to the next one to stay on track. {next_q}"
                 st.session_state.q_index += 1
@@ -715,11 +886,14 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
 
                 if st.session_state.q_index < len(q_bank):
                     st.session_state.current_question = q_bank[st.session_state.q_index]
-            
-            reply = ai_reply
-        st.session_state.chat_history.append({"role": "assistant", "content": reply})
-        st.session_state.pending_voice = reply
-        st.rerun()
+
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": ai_reply
+            })
+
+            st.session_state.pending_voice = ai_reply
+            st.rerun()
 
 
 # ================== MAIN APP ==================

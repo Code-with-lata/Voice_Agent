@@ -180,6 +180,12 @@ Examples:
 - phone aa raha hai
 - hold on
 - hello sir
+- someone is helping me
+- wait bro
+- haan bata
+- kya answer h
+- google kar
+- read this
 
 NEXT_QUESTION:
 - User wants to skip current question
@@ -270,7 +276,7 @@ def ai_voice_output(text):
             <div id="status_{unique_id}" style="color: #764ba2; font-size: 14px; font-weight: bold;">
                 🔊 AI is speaking... (Try interrupting me)
             </div>
-            <audio id="{unique_id}">
+            <audio id="{unique_id}" autoplay>
                 <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
             </audio>
             
@@ -280,13 +286,14 @@ def ai_voice_output(text):
                     const status = document.getElementById('status_{unique_id}');
                     
                     let playbackStarted = false;
+                    let interruptionDetected = false;
                     let echoGuardTime = Date.now() + 600; // 600ms ka buffer
 
                     audio.play().then(() => {{
                         playbackStarted = true;
-                    }}).catch(e => console.log("Autoplay blocked"));
+                    }}).catch(e => console.log(e));
 
-                    async function startInterruptionDetection() {{
+                    async function detectVoice() {{
                         try {{
                             const stream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
                             const audioContext = new AudioContext();
@@ -301,20 +308,45 @@ def ai_voice_output(text):
                             function checkVolume() {{
                                 analyser.getByteFrequencyData(dataArray);
                                 let values = 0;
+                                let highPeaks = 0;
                                 for (let i = 0; i < bufferLength; i++) {{
                                     values += dataArray[i];
+
+                                    if (dataArray[i] > 180) {{
+                                        highPeaks++;
+                                    }}
                                 }}
                                 let average = values / bufferLength;
 
-                                // ECHO GUARD LOGIC:
-                                
-                                if (playbackStarted && Date.now() > echoGuardTime && average > 55) {{ 
-                                    console.log("True User Interruption Detected!");
-                                    audio.pause();
-                                    status.innerHTML = "⏹️ Bot stopped (Interrupted)";
+                                // MULTIPLE VOICE DETECTION
+                                if (highPeaks > 25) {{
+        
+                                    console.log("Possible multiple voices detected");
+        
+                                    localStorage.setItem("multiple_voice", "true");
+        
+                                    status.innerHTML = "⚠️ Multiple voices detected";
                                     status.style.color = "red";
                                 }}
+
+                                // ECHO GUARD LOGIC:
                                 
+                                if (playbackStarted && Date.now() > echoGuardTime && average > 55 && !interruptionDetected ) {{ 
+                                    interruptionDetected = true;
+                                    console.log("True User Interruption Detected!");
+                                    audio.pause();
+                                    status.innerHTML = "🎤 Listening...";
+                                    status.style.color = "red";
+                                }}
+
+                                // TAB SWITCH DETECTION
+                                document.addEventListener("visibilitychange", () => {{
+        
+                                    if (document.hidden) {{
+                                        localStorage.setItem("tab_switch", "true");
+                                    }}
+                                }});
+                                        
                                 if (!audio.paused && !audio.ended) {{
                                     requestAnimationFrame(checkVolume);
                                 }} else if (audio.ended) {{
@@ -327,7 +359,7 @@ def ai_voice_output(text):
                         }}
                     }}
                     
-                    startInterruptionDetection();
+                    detectVoice();
                 }})();
             </script>
         """
@@ -564,6 +596,22 @@ def generate_report():
         doc.add_paragraph("Soft skills evaluation: Professional and clear communication observed.")
 
     
+    # ================= INTEGRITY ANALYSIS =================
+
+    doc.add_heading('Interview Integrity Analysis', level=1)
+    
+    if st.session_state.cheating_flags:
+    
+        for flag in st.session_state.cheating_flags:
+            doc.add_paragraph(f"⚠️ {flag}")
+    
+        doc.add_paragraph(
+            f"Suspicion Score: {st.session_state.suspicion_score}"
+        )
+    
+    else:
+        doc.add_paragraph("No suspicious activity detected.")
+
     # --- COMPLETE SUMMARY & FINAL TOTAL SCORE ---
     doc.add_heading(' Executive Summary:', level=1)
     total_obtained = sum(calculated_scores)
@@ -625,6 +673,11 @@ def init_session():
         "pause_count": 0,  
         "is_paused_state": False,
         "current_question": None,
+        "cheating_flags": [],
+        "suspicion_score": 0,
+        "tab_switch_count": 0,
+        "multiple_voice_count": 0,
+        "is_ai_speaking": False,
         "last_response_time": time.time()
         
     }
@@ -674,10 +727,33 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
 
         user_text = transcribe_audio(stt_model, audio_bytes)
 
-        # FIX: silence handling
-        if not user_text or len(user_text.strip()) == 0:
-            user_text = "..."
+        # AI Speaking & Interruption Logic
+        if st.session_state.get("is_ai_speaking") and time.time() < st.session_state.get("ai_end_time", 0):
+    
+            if not user_text or len(user_text.strip().split()) < 3:
+                st.session_state.mic_counter += 1
+                st.rerun()
+                return
+            else:
+                st.session_state.is_ai_speaking = False
+                st.session_state.ai_end_time = 0
 
+        if not user_text or len(user_text.strip()) == 0:
+            
+            user_text = "..."
+        
+        response_delay = time.time() - st.session_state.last_response_time
+        word_count = len(user_text.split())
+        
+        if response_delay > 10 and word_count > 80:
+            st.session_state.suspicion_score += 1
+            st.session_state.cheating_flags.append(
+                "Long silence followed by unusually detailed answer"
+            )
+
+        st.session_state.last_response_time = time.time()
+
+        # SAVE USER MESSAGE 
         st.session_state.chat_history.append({
             "role": "user",
             "content": user_text
@@ -687,8 +763,7 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
         q_bank = st.session_state.q_bank
         current_q = st.session_state.current_question
 
-        
-        # PAUSE HANDLING FIRST 
+        # PAUSE HANDLING 
 
         if user_text.strip() in ["", "..."]:
 
@@ -720,9 +795,8 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
 
         st.session_state.pause_count = 0
 
-        
         # INTRO FLOW 
-    
+
         positive_reply = any(word in user_text.lower() for word in [
             "yes", "ready", "ok", "sure", "start"
         ])
@@ -772,6 +846,7 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
             st.session_state.pending_voice = reply
             st.rerun()
 
+        # 🔥 SINGLE LLM CLASSIFICATION 
 
         speech_type = classify_user_input(
             groq_client,
@@ -779,7 +854,9 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
             current_q
         )
 
+        # ==========================================================
         # BACKGROUND TALK
+        # ==========================================================
 
         if speech_type == "BACKGROUND_TALK":
             if idx < len(q_bank):
@@ -798,7 +875,9 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
             st.session_state.pending_voice = reply
             st.rerun()
 
+        # ==========================================================
         # INTERRUPTION
+        # ==========================================================
 
         if speech_type == "INTERRUPTION":
             reply = f"Sure. Let me repeat.\n\n{current_q}"
@@ -811,20 +890,23 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
             st.session_state.pending_voice = reply
             st.rerun()
 
+        # ==========================================================
         # NEXT QUESTION
+        # ==========================================================
         
         if speech_type == "NEXT_QUESTION":
-        
-            if idx < len(q_bank):
-                
-                next_q = q_bank[idx]
+            
+            current_idx = st.session_state.q_index 
+            
+            if current_idx < len(q_bank):
+                next_q = q_bank[current_idx]
 
                 st.session_state.current_question = next_q
-                
-                st.session_state.q_index += 1
+                st.session_state.q_index += 1  
+                st.session_state.followup_count = 0  
         
-                reply = f"Sure. {next_q}"
-        
+                reply = f"Sure. Skipping this one. Here is your next question: {next_q}"
+
             else:
                 reply = "Interview completed. Generating your report..."
                 st.session_state.report_ready = True
@@ -837,7 +919,9 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
             st.session_state.pending_voice = reply
             st.rerun()
 
-        # TECHNICAL FLOW ONLY
+        # ==========================================================
+        # TECHNICAL FLOW ONLY (SAFE)
+        # ==========================================================
 
         if idx >= len(q_bank):
             reply = "Interview is already complete. Generating your report..."
@@ -929,16 +1013,20 @@ def main():
     
 
     if st.session_state.pending_voice:
-        ai_voice_output(st.session_state.pending_voice)
-        wait_time = (len(st.session_state.pending_voice) / 10) + 2
+        st.session_state.is_ai_speaking = True
 
-        time.sleep(wait_time)
+        ai_voice_output(st.session_state.pending_voice)
+        wait_time = max(3, len(st.session_state.pending_voice) / 8)
+
+        st.session_state.ai_end_time = time.time() + wait_time
+
+        # time.sleep(wait_time)
 
         st.session_state.pending_voice = None
 
         st.session_state.mic_counter += 1 
 
-        st.rerun()
+        # st.rerun()
     
     # Control panel
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -966,6 +1054,47 @@ def main():
         st.rerun()
         
     st.markdown("---")
+
+    # MULTIPLE VOICE CHECK
+    multiple_voice = st.query_params.get("multiple_voice", "false")
+    
+    if multiple_voice == "true":
+    
+        st.session_state.multiple_voice_count += 1
+    
+        st.session_state.cheating_flags.append(
+            "Possible multiple voices detected during interview"
+        )
+    
+        st.warning("⚠️ Multiple voices detected. Please ensure only candidate speaks.")
+    
+        st.query_params.clear()
+    
+    
+    # TAB SWITCH DETECTION
+    switched = st.query_params.get("tab_switch", "false")
+    
+    if switched == "true":
+    
+        st.session_state.tab_switch_count += 1
+    
+        st.session_state.suspicion_score += 1
+    
+        st.session_state.cheating_flags.append(
+            "Candidate switched browser tab during interview"
+        )
+    
+        st.warning("⚠️ Tab switching detected.")
+    
+        st.query_params.clear()
+    
+    # AI speech finished check
+
+    if (
+        st.session_state.get("is_ai_speaking")
+        and time.time() > st.session_state.get("ai_end_time", 0)
+    ):
+        st.session_state.is_ai_speaking = False
     
     if not st.session_state.report_ready: 
         if st.session_state.pending_voice is None:
@@ -985,8 +1114,7 @@ def main():
 
         if audio_bytes:
             process_user_audio(audio_bytes, stt_model, groq_client)
-
-    
+        
     # ===== DOWNLOAD REPORT =====
     if st.session_state.report_ready:
         

@@ -922,6 +922,8 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
         # ==========================================================
         # TECHNICAL FLOW ONLY (SAFE)
         # ==========================================================
+        
+        existing = None
 
         if idx >= len(q_bank):
             reply = "Interview is already complete. Generating your report..."

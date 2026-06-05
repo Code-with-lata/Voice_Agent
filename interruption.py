@@ -896,14 +896,13 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
         
         if speech_type == "NEXT_QUESTION":
             
-            current_idx = st.session_state.q_index 
-            
-            if current_idx < len(q_bank):
-                next_q = q_bank[current_idx]
+            if idx < len(q_bank):
+                
+                next_q = q_bank[idx]
 
                 st.session_state.current_question = next_q
-                st.session_state.q_index += 1  
-                st.session_state.followup_count = 0  
+                
+                st.session_state.q_index += 1
         
                 reply = f"Sure. Skipping this one. Here is your next question: {next_q}"
 

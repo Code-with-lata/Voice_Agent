@@ -935,8 +935,8 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
                     st.session_state.q_index += 1
                 st.session_state.followup_count = 0
 
-                if st.session_state.q_index < len(q_bank):
-                    st.session_state.current_question = q_bank[st.session_state.q_index]
+                # if st.session_state.q_index < len(q_bank):
+                #     st.session_state.current_question = q_bank[st.session_state.q_index]
 
             st.session_state.chat_history.append({
                 "role": "assistant",

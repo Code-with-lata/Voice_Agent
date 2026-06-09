@@ -985,7 +985,7 @@ def main():
 
         ai_voice_output(st.session_state.pending_voice)
         word_count = len(st.session_state.pending_voice.split())
-        wait_time = (word_count * 0.45) + 2.5
+        wait_time = (word_count * 0.45) + 3.0
 
         st.session_state.ai_end_time = time.time() + wait_time
 

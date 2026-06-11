@@ -291,8 +291,8 @@ def ai_voice_output(text):
 
                     // --- NOISE FILTER VARIABLES ---
                     let speechFrameCount = 0;
-                    const REQUIRED_SPEECH_FRAMES = 6; // Lagatar 6 frames (~100ms) tak sound hona chahiye
-                    const VOICE_VOLUME_THRESHOLD = 60; // Base volume threshold for voice
+                    const REQUIRED_SPEECH_FRAMES = 6; 
+                    const VOICE_VOLUME_THRESHOLD = 60; 
 
                     audio.play().then(() => {{
                         playbackStarted = true;
@@ -304,7 +304,7 @@ def ai_voice_output(text):
                             const audioContext = new AudioContext();
                             const source = audioContext.createMediaStreamSource(stream);
                             const analyser = audioContext.createAnalyser();
-                            analyser.fftSize = 256; // 128 frequency bins milenge
+                            analyser.fftSize = 256; 
                             source.connect(analyser);
 
                             const bufferLength = analyser.frequencyBinCount;
@@ -319,9 +319,7 @@ def ai_voice_output(text):
                                 let highNoiseEnergy = 0;
                                 let highNoiseBinsCount = 0;
                                 let highPeaks = 0;
-
-                                // Audio spectrum analysis (Sample rate 44.1kHz / fftSize 256)
-                                // Har frequency bin lagbhag ~172Hz ko represent karta hai.
+                                
                                 for (let i = 0; i < bufferLength; i++) {{
                                     totalVolume += dataArray[i];
                                     
@@ -329,13 +327,12 @@ def ai_voice_output(text):
                                         highPeaks++;
                                     }}
 
-                                    // Bins 2 se 15 tak lagbhag 340Hz se 2500Hz tak ki frequency cover karte hain (Human Speech Range)
                                     if (i >= 2 && i <= 15) {{
                                         humanVoiceEnergy += dataArray[i];
                                         voiceBinsCount++;
                                     }}
                                     
-                                    // Bins 18 se upar sharp/clapping/glass sounds hoti hain (High Frequency Noise)
+                                    
                                     if (i > 18) {{
                                         highNoiseEnergy += dataArray[i];
                                         highNoiseBinsCount++;
@@ -355,15 +352,13 @@ def ai_voice_output(text):
                                 }}
 
                                 // --- SMART VALID SPEECH FILTER LOGIC ---
-                                // 1. Volume overall strict threshold cross kare.
-                                // 2. Human voice frequency range me sound energy, high-frequency noise se kam se kam 1.4 guna jyada honi chahiye.
+                                
                                 if (playbackStarted && Date.now() > echoGuardTime && average > VOICE_VOLUME_THRESHOLD && avgVoice > (avgHighNoise * 1.4)) {{
-                                    speechFrameCount++; // Valid voice mil rahi hai, frames count karo
+                                    speechFrameCount++; 
                                 }} else {{
-                                    speechFrameCount = Math.max(0, speechFrameCount - 1); // Decay logic: transient noise ko counter se nikal do
+                                    speechFrameCount = Math.max(0, speechFrameCount - 1); o
                                 }}
 
-                                // Jab lagatar REQUIRED_SPEECH_FRAMES tak human voice milegi tabhi interrupt hoga
                                 if (speechFrameCount >= REQUIRED_SPEECH_FRAMES && !interruptionDetected) {{
                                     interruptionDetected = true;
                                     console.log("True User Speech Interruption Detected!");

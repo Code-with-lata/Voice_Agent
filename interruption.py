@@ -289,6 +289,11 @@ def ai_voice_output(text):
                     let interruptionDetected = false;
                     let echoGuardTime = Date.now() + 600; // 600ms ka buffer
 
+                    // --- NOISE FILTER VARIABLES ---
+                    let speechFrameCount = 0;
+                    const REQUIRED_SPEECH_FRAMES = 6; // Lagatar 6 frames (~100ms) tak sound hona chahiye
+                    const VOICE_VOLUME_THRESHOLD = 60; // Base volume threshold for voice
+
                     audio.play().then(() => {{
                         playbackStarted = true;
                     }}).catch(e => console.log(e));
@@ -299,7 +304,7 @@ def ai_voice_output(text):
                             const audioContext = new AudioContext();
                             const source = audioContext.createMediaStreamSource(stream);
                             const analyser = audioContext.createAnalyser();
-                            analyser.fftSize = 256;
+                            analyser.fftSize = 256; // 128 frequency bins milenge
                             source.connect(analyser);
 
                             const bufferLength = analyser.frequencyBinCount;
@@ -307,48 +312,73 @@ def ai_voice_output(text):
 
                             function checkVolume() {{
                                 analyser.getByteFrequencyData(dataArray);
-                                let values = 0;
+                                
+                                let totalVolume = 0;
+                                let humanVoiceEnergy = 0;
+                                let voiceBinsCount = 0;
+                                let highNoiseEnergy = 0;
+                                let highNoiseBinsCount = 0;
                                 let highPeaks = 0;
-                                for (let i = 0; i < bufferLength; i++) {{
-                                    values += dataArray[i];
 
+                                // Audio spectrum analysis (Sample rate 44.1kHz / fftSize 256)
+                                // Har frequency bin lagbhag ~172Hz ko represent karta hai.
+                                for (let i = 0; i < bufferLength; i++) {{
+                                    totalVolume += dataArray[i];
+                                    
                                     if (dataArray[i] > 180) {{
                                         highPeaks++;
                                     }}
+
+                                    // Bins 2 se 15 tak lagbhag 340Hz se 2500Hz tak ki frequency cover karte hain (Human Speech Range)
+                                    if (i >= 2 && i <= 15) {{
+                                        humanVoiceEnergy += dataArray[i];
+                                        voiceBinsCount++;
+                                    }}
+                                    
+                                    // Bins 18 se upar sharp/clapping/glass sounds hoti hain (High Frequency Noise)
+                                    if (i > 18) {{
+                                        highNoiseEnergy += dataArray[i];
+                                        highNoiseBinsCount++;
+                                    }}
                                 }}
-                                let average = values / bufferLength;
+
+                                let average = totalVolume / bufferLength;
+                                let avgVoice = voiceBinsCount > 0 ? (humanVoiceEnergy / voiceBinsCount) : 0;
+                                let avgHighNoise = highNoiseBinsCount > 0 ? (highNoiseEnergy / highNoiseBinsCount) : 0;
 
                                 // MULTIPLE VOICE DETECTION
                                 if (highPeaks > 25) {{
-        
                                     console.log("Possible multiple voices detected");
-        
                                     localStorage.setItem("multiple_voice", "true");
-        
                                     status.innerHTML = "⚠️ Multiple voices detected";
                                     status.style.color = "red";
                                 }}
 
-                                // ECHO GUARD LOGIC:
+                                // --- SMART VALID SPEECH FILTER LOGIC ---
+                                // 1. Volume overall strict threshold cross kare.
+                                // 2. Human voice frequency range me sound energy, high-frequency noise se kam se kam 1.4 guna jyada honi chahiye.
+                                if (playbackStarted && Date.now() > echoGuardTime && average > VOICE_VOLUME_THRESHOLD && avgVoice > (avgHighNoise * 1.4)) {{
+                                    speechFrameCount++; // Valid voice mil rahi hai, frames count karo
+                                }} else {{
+                                    speechFrameCount = Math.max(0, speechFrameCount - 1); // Decay logic: transient noise ko counter se nikal do
+                                }}
 
-                                const INTERRUPTION_THRESHOLD = 75;
-
-                                if (playbackStarted && Date.now() > echoGuardTime && average > INTERRUPTION_THRESHOLD && !interruptionDetected ) {{ 
+                                // Jab lagatar REQUIRED_SPEECH_FRAMES tak human voice milegi tabhi interrupt hoga
+                                if (speechFrameCount >= REQUIRED_SPEECH_FRAMES && !interruptionDetected) {{
                                     interruptionDetected = true;
-                                    console.log("True User Interruption Detected!");
+                                    console.log("True User Speech Interruption Detected!");
                                     audio.pause();
-                                    status.innerHTML = "🎤 Listening...";
+                                    status.innerHTML = "🎤 Listening... (Interrupted by Speech)";
                                     status.style.color = "red";
                                 }}
 
                                 // TAB SWITCH DETECTION
                                 document.addEventListener("visibilitychange", () => {{
-        
                                     if (document.hidden) {{
                                         localStorage.setItem("tab_switch", "true");
                                     }}
                                 }});
-                                        
+
                                 if (!audio.paused && !audio.ended) {{
                                     requestAnimationFrame(checkVolume);
                                 }} else if (audio.ended) {{
@@ -360,7 +390,6 @@ def ai_voice_output(text):
                             console.error("Mic error:", err);
                         }}
                     }}
-                    
                     detectVoice();
                 }})();
             </script>
@@ -985,7 +1014,7 @@ def main():
 
         ai_voice_output(st.session_state.pending_voice)
         word_count = len(st.session_state.pending_voice.split())
-        wait_time = (word_count * 0.45) + 3.0
+        wait_time = (word_count * 0.45) + 2.5
 
         st.session_state.ai_end_time = time.time() + wait_time
 

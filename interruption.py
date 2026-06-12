@@ -292,7 +292,7 @@ def ai_voice_output(text):
                     // --- NOISE FILTER VARIABLES ---
                     let speechFrameCount = 0;
                     const REQUIRED_SPEECH_FRAMES = 6; 
-                    const VOICE_VOLUME_THRESHOLD = 60; 
+                    const VOICE_VOLUME_THRESHOLD = 65; 
 
                     audio.play().then(() => {{
                         playbackStarted = true;

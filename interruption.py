@@ -1099,7 +1099,7 @@ def main():
                 neutral_color="#3498db",
                 icon_name="microphone",
                 icon_size="2x",
-                pause_threshold=2.5, 
+                pause_threshold=5, 
                 sample_rate=16000,
                 auto_start=True,
                 key=f"mic_{st.session_state.mic_counter}" 

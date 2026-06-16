@@ -535,22 +535,23 @@ def generate_report():
                 )
                 res_text = res.choices[0].message.content
                 scores = re.findall(
-                    r'Correctness:\s*(\d).*?Depth:\s*(\d).*?Keywords:\s*(\d).*?Communication:\s*(\d)',
-                    res_text,
-                    re.IGNORECASE | re.DOTALL
+                    r'(?:Correctness|Depth|Keywords|Communication):\s*([\d\.]+)', 
+                    res_text, 
+                    re.IGNORECASE
                 )
+                if len(scores) >= 4:
+                        # Saare scores ko float mein convert karke average nikalna
+                    nums = [float(s) for s in scores[:4]]
+                    q_score = round(sum(nums) / 4, 1)
+                else:
+                    q_score = 0.0
+
                 evaluation_match = re.search(
                     r'Evaluation:\s*(.*)',
                     res_text,
                     re.IGNORECASE | re.DOTALL
                 )
                 
-                if scores:
-                        nums = list(map(int, scores[0]))
-                        q_score = round(sum(nums) / 4, 1)
-                else:
-                    q_score = 0.0
-
                 evaluation_text = (
                     evaluation_match.group(1).strip()
                     if evaluation_match
@@ -800,14 +801,14 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
                     reply = "Interview completed. Generating report..."
                     st.session_state.report_ready = True
 
-        st.session_state.chat_history.append({
-            "role": "assistant",
-            "content": reply
-        })
-
-        st.session_state.pending_voice = reply
-        st.session_state.mic_counter += 1
-        st.rerun()
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": reply
+            })
+    
+            st.session_state.pending_voice = reply
+            st.session_state.mic_counter += 1
+            st.rerun()
 
         st.session_state.pause_count = 0
 
@@ -912,7 +913,10 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
         # ==========================================================
         # TECHNICAL FLOW ONLY (SAFE)
         # ==========================================================
-        
+        if idx >= len(q_bank):
+            reply = "Interview is already complete. Generating your report..."
+            st.session_state.report_ready = True
+
         else:
             clean_answer = user_text.strip()
 
@@ -929,10 +933,7 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
                     "final_score": 0.0
                 })
 
-            if st.session_state.q_index < len(q_bank):
-                next_q = q_bank[st.session_state.q_index]
-            else:
-                next_q = "End"
+            next_q = q_bank[idx] if idx < len(q_bank) else "End"    
 
             reply = get_ai_decision(
                 groq_client,
@@ -953,14 +954,14 @@ def process_user_audio(audio_bytes, stt_model, groq_client):
 
 
             if st.session_state.followup_count >= 2:
-                if st.session_state.q_index < len(q_bank):
-                    st.session_state.current_question = q_bank[st.session_state.q_index]
-                    reply = f"I see. Let's move to the next one to stay on track. {next_q}"
-                    st.session_state.q_index += 1
+                # if st.session_state.q_index < len(q_bank):
+                    # st.session_state.current_question = q_bank[st.session_state.q_index]
+                reply = f"I see. Let's move to the next one to stay on track. {next_q}"
+                st.session_state.q_index += 1
                 st.session_state.followup_count = 0
 
-                # if st.session_state.q_index < len(q_bank):
-                #     st.session_state.current_question = q_bank[st.session_state.q_index]
+                if st.session_state.q_index < len(q_bank):
+                    st.session_state.current_question = q_bank[st.session_state.q_index]
 
             st.session_state.chat_history.append({
                 "role": "assistant",
@@ -1008,18 +1009,21 @@ def main():
         st.session_state.is_ai_speaking = True
 
         ai_voice_output(st.session_state.pending_voice)
-        word_count = len(st.session_state.pending_voice.split())
-        wait_time = (word_count * 0.45) + 2.5
+        # word_count = len(st.session_state.pending_voice.split())
+        # wait_time = (word_count * 0.45) + 2.5
+        wait_time = (len(st.session_state.pending_voice) / 10) + 2
 
-        st.session_state.ai_end_time = time.time() + wait_time
+        # st.session_state.ai_end_time = time.time() + wait_time
 
-        # time.sleep(wait_time)
+        time.sleep(wait_time)
+
+        st.session_state.is_ai_speaking = False
 
         st.session_state.pending_voice = None
 
         st.session_state.mic_counter += 1 
 
-        # st.rerun()
+        st.rerun()
     
     # Control panel
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -1099,7 +1103,7 @@ def main():
                 neutral_color="#3498db",
                 icon_name="microphone",
                 icon_size="2x",
-                pause_threshold=5, 
+                pause_threshold=3.5, 
                 sample_rate=16000,
                 auto_start=True,
                 key=f"mic_{st.session_state.mic_counter}" 
